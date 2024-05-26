@@ -22,6 +22,11 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
+#include "stdio.h"
+#include "string.h"
+#include <stdlib.h>
+#include <time.h>
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -44,9 +49,12 @@ ADC_HandleTypeDef hadc1;
 ADC_HandleTypeDef hadc2;
 
 I2C_HandleTypeDef hi2c1;
+
 SPI_HandleTypeDef hspi1;
+
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim4;
+TIM_HandleTypeDef htim6;
 
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
@@ -69,12 +77,467 @@ static void MX_TIM4_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_ADC2_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_TIM6_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+//--------enums
+enum state {
+	MENU,
+	ENTERING_USERNAME,
+	ENTERING_PASSWORD,
+	NEW_USERNAME,
+	NEW_PASSWORD,
+	ENTERING_STATE,
+	SYSTEM_ON,
+	DOZD_DETECTED_USERNAME,
+	DOZD_DETECTED_PASSWORD
+
+};
+
+enum daytime {
+	DAY,
+	NIGHT
+};
+
+enum buzzer_sound {
+	SIGN,
+	SQUARE,
+	TRIANGLE
+};
+
+
+
+
+//-----------Global variables-----------\\
+
+
+//--------general controlling variables
+uint8_t current_state = MENU;
+uint8_t daytime = NIGHT;
+char username[4] = "----";
+char username_to_check[4] = "----";
+uint8_t password[20] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+uint8_t pass_index = 0;
+uint8_t password_to_check[20] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+uint8_t pass_tck_index = 0;
+
+//--------UART
+char received_data[50];
+uint8_t data_index = 0;
+char receive;
+char transmit_data[50];
+uint8_t uart_mode = 1;
+uint8_t log_state = 0;
+
+
+//--------Buzzer
+TIM_HandleTypeDef *buzzer_pwm_timer = &htim4;	// Point to PWM Timer configured in CubeMX
+uint32_t buzzer_pwm_channel = TIM_CHANNEL_4;   // Select configured PWM channel number
+volatile uint16_t volume = 100; // (0 - 1000)
+uint32_t sound_timer = 0;
+uint8_t alarm_on = 0;
+uint32_t freq = 0;
+
+//--------LED
+TIM_HandleTypeDef *led_pwm_timer = &htim2;
+uint32_t led_pwm_channel = TIM_CHANNEL_2;   // Select configured PWM channel number
+uint8_t led_blink = 0;
+
+
+
+
+uint8_t strcmpwithlength(const char * str1, const char * str2, const uint8_t len)
+{
+	for(int i = 0 ; i < len; ++i) {
+		if(str1[i] != str2[i])
+			return 0;
+	}
+	return 1;
+}
+
+uint8_t passcmp()
+{
+	for(int i = 0 ; i < pass_tck_index; ++i) {
+		if(password[i] != password_to_check[i])
+			return 0;
+	}
+	return 1;
+}
+
+uint8_t check_username() {
+	for(int i = 0 ; i < 4; ++i) {
+			if(username[i] != username_to_check[i])
+				return 0;
+		}
+		return 1;
+}
+
+
+
+void PWM_Start()
+{
+    HAL_TIM_PWM_Start(buzzer_pwm_timer, buzzer_pwm_channel);
+    HAL_TIM_PWM_Start(led_pwm_timer, led_pwm_channel);
+}
+
+void PWM_Change_Tone(uint16_t pwm_freq, uint16_t volume) // pwm_freq (1 - 20000), volume (0 - 1000)
+{
+    if (pwm_freq == 0 || pwm_freq > 20000)
+    {
+        __HAL_TIM_SET_COMPARE(buzzer_pwm_timer, buzzer_pwm_channel, 0);
+    }
+    else
+    {
+        const uint32_t internal_clock_freq = HAL_RCC_GetSysClockFreq();
+        const uint16_t prescaler = 1;
+        const uint32_t timer_clock = internal_clock_freq / prescaler;
+        const uint32_t period_cycles = timer_clock / pwm_freq;
+        const uint32_t pulse_width = volume * period_cycles / 1000 / 2;
+
+        buzzer_pwm_timer->Instance->PSC = prescaler - 1;
+        buzzer_pwm_timer->Instance->ARR = period_cycles - 1;
+        buzzer_pwm_timer->Instance->EGR = TIM_EGR_UG;
+        __HAL_TIM_SET_COMPARE(buzzer_pwm_timer, buzzer_pwm_channel, pulse_width); // buzzer_pwm_timer->Instance->CCR2 = pulse_width;
+    }
+}
+
+void update_tone() {
+	static int8_t i = 1;
+	if(sound_timer < 1000) { //Square
+		freq = (sound_timer / 100) % 2 ? 500 : 2000;
+	} else if(sound_timer < 2000) { //Triangle
+		freq = freq + (10 * i);
+//		if(freq == 5000 || freq == 100)
+//			i = i * -1;
+		if(freq == 5000)
+			freq = 1000;
+	} else if(sound_timer < 3000) {
+		freq = 5000;
+	} else {
+		sound_timer = 0;
+	}
+	++sound_timer;
+	PWM_Change_Tone(freq, volume);
+}
+
+
+
+//  //--------Interrupts Functions--------\\
+
+  //TIMERS
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+	static int i = 1;
+	if(htim->Instance == TIM2) {
+		if(led_blink == 1) {
+			htim2.Instance->CCR2 = htim2.Instance->CCR2 + (i * 100);
+			if(htim2.Instance->CCR2 == 10000 || htim2.Instance->CCR2 == 0)
+				i = i * -1;
+		} else if(led_blink == 2) {
+			if(sound_timer / 100 % 2 && htim2.Instance->CCR2 == 10000)
+				htim2.Instance->CCR2 = 0;
+			else if(sound_timer / 100 % 2 == 0)
+				htim2.Instance->CCR2 = 10000;
+		}
+	}
+	else if(htim->Instance == TIM6) {
+		HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_10);
+		switch(current_state) {
+			case MENU :
+				HAL_GPIO_WritePin(GPIOC, GPIO_PIN_10, 1);
+				HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, 0);
+				htim2.Instance->CCR2 = 0;
+				led_blink = 0;
+				break;
+			case ENTERING_PASSWORD:
+			case ENTERING_STATE :
+				HAL_GPIO_WritePin(GPIOC, GPIO_PIN_10, 0);
+				HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, 1);
+				htim2.Instance->CCR2 = 0;
+				led_blink = 0;
+				break;
+			case SYSTEM_ON :
+				HAL_GPIO_WritePin(GPIOC, GPIO_PIN_10, 0);
+				HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, 0);
+				led_blink = 1;
+				break;
+			case DOZD_DETECTED_PASSWORD:
+			case DOZD_DETECTED_USERNAME:
+				HAL_GPIO_WritePin(GPIOC, GPIO_PIN_10, 0);
+				HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, 0);
+				led_blink = 2;
+				if(daytime == DAY)
+					HAL_GPIO_WritePin(GPIOC, GPIO_PIN_12, 1);
+				else if(daytime == NIGHT)
+					update_tone();
+				break;
+		}
+	}
+}
+
+  //--------Buttons
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+	if(GPIO_Pin == GPIO_PIN_0 && current_state == SYSTEM_ON) { // PIR
+		HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_8);
+		current_state = DOZD_DETECTED_USERNAME;
+		uart_log(11);
+		return;
+	}
+	static last_interrupt = 0;
+	if(HAL_GetTick() - last_interrupt < 250)
+		return;
+
+	last_interrupt = HAL_GetTick();
+
+	if(current_state == NEW_PASSWORD) {
+		if(GPIO_Pin == GPIO_PIN_1) { //[] [] [.]
+			password[pass_index] = 3;
+			++pass_index;
+		} else if(GPIO_Pin == GPIO_PIN_2) { //[] [.] []
+			password[pass_index] = 2;
+			++pass_index;
+		} else if(GPIO_Pin == GPIO_PIN_3) { //[.] [] []
+			password[pass_index] = 1;
+			++pass_index;
+		}
+		if(pass_index > 19)
+			pass_index = 0;
+
+	} else if (current_state == ENTERING_PASSWORD || current_state == DOZD_DETECTED_PASSWORD) {
+		if(GPIO_Pin == GPIO_PIN_1) { //[] [] [.]
+			password_to_check[pass_tck_index] = 3;
+			++pass_tck_index;
+		} else if(GPIO_Pin == GPIO_PIN_2) { //[] [.] []
+			password_to_check[pass_tck_index] = 2;
+			++pass_tck_index;
+		} else if(GPIO_Pin == GPIO_PIN_3) { //[.] [] []
+			password_to_check[pass_tck_index] = 1;
+			++pass_tck_index;
+		}
+		if(pass_index > 19)
+			pass_tck_index = 0;
+
+	}
+}
+
+  //--------ADC
+//  void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc) {
+//  	if(hadc->Instance == ADC1) {
+//  		static uint8_t sample_no = 0;
+//  		static uint32_t samples_sum = 0;
+//  		static uint16_t val;
+//  		val = HAL_ADC_GetValue(&hadc1);
+//  		samples_sum += val;
+//  		++sample_no;
+//  		if(sample_no == MAX_SAMPLE_NUMBER) {
+//  			if(current_state == CHANGING_VOLUME) {
+//  				potensiometer_value = samples_sum / MAX_SAMPLE_NUMBER / 40;
+//  				volume = potensiometer_value;
+//  				uart_log(4);
+//  			} else if(current_state == CHANGING_SONG) {
+//  				potensiometer_value = samples_sum / MAX_SAMPLE_NUMBER / 40;
+//  				uart_log(2);
+//  			} else if(current_state == CHANGING_SEVEN_SEGMENT_LIGHT_VOLUME) {
+//  				potensiometer_value = 29 + (samples_sum / MAX_SAMPLE_NUMBER / 56);
+//  		        __HAL_TIM_SET_COMPARE(seven_segment_light_timer, seven_segment_light_channel, potensiometer_value);
+//  			}
+//  			sample_no = 0;
+//  			samples_sum = 0;
+//  		}
+//  	} else if(hadc->Instance == ADC2) {
+//  		static uint8_t sample_no = 0;
+//  		static uint32_t samples_sum = 0;
+//  		static uint16_t val;
+//  		val = HAL_ADC_GetValue(&hadc2);
+//  		samples_sum += val;
+//  		++sample_no;
+//  		if(sample_no == MAX_SAMPLE_NUMBER) {
+//  			potensiometer_value = 100 - (samples_sum / MAX_SAMPLE_NUMBER / 56);
+//  	        __HAL_TIM_SET_COMPARE(seven_segment_light_timer, seven_segment_light_channel, potensiometer_value);
+//  			HAL_GPIO_WritePin(GPIOE, GPIO_PIN_8, 1);
+//  			sample_no = 0;
+//  			samples_sum = 0;
+//  		}
+//  	}
+//  }
+//
+
+
+
+void uart_log(uint8_t state) {
+
+	switch (state) {
+		case 0:
+			sprintf(transmit_data, "[SYSTM][Menu]\r\n[Sign in -> 1]\r\n[Log in  -> 2]\r\n");
+			break;
+		case 1:
+			sprintf(transmit_data, "[ERROR][Wrong command]\r\n");
+			break;
+		case 2:
+			sprintf(transmit_data, "[SYSTM][Enter new username:]\r\n");
+			break;
+		case 3:
+			sprintf(transmit_data, "[SYSTM][Enter username:]\r\n");
+			break;
+		case 4:
+			sprintf(transmit_data, "[SYSTM][Enter new password:]\r\n");
+			break;
+		case 5:
+			sprintf(transmit_data, "[SYSTM][Enter password:]\r\n");
+			break;
+		case 6:
+			sprintf(transmit_data, "[SYSTM][Enter on to turn on system:]\r\n");
+			break;
+		case 7:
+			sprintf(transmit_data, "[ERROR][Usename not valid]\r\n[SYSTM][Menu]\r\n[Sign in -> 1]\r\n[Log in  -> 2]\r\n");
+			break;
+		case 8:
+			sprintf(transmit_data, "[ERROR][Wrong password!]\r\n");
+			break;
+		case 9:
+			sprintf(transmit_data, "[ERROR][Password not valid]\r\n");
+			break;
+		case 10:
+			sprintf(transmit_data, "[SYSTM][System activated successfully.]\r\n[detecting DOZD!...]\r\n");
+			break;
+		case 11:
+			sprintf(transmit_data, "[WRNNG][!!!DOZD DETECTED!!!]\r\n[!!!Enter username and password!!!]\r\n");
+			break;
+		default:
+			break;
+	}
+	HAL_UART_Transmit(&huart1, transmit_data, strlen(transmit_data), 200);
+}
+
+
+//  --------UART
+  void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+  {
+  	if(huart->Instance == USART1) {
+  		HAL_UART_Receive_IT(&huart1, &receive, 1);
+		received_data[data_index] = receive;
+		++data_index;
+
+		if(receive == '\r') {
+			if(current_state == MENU) {
+				if(data_index > 2) {
+					log_state = 1;
+				} else {
+					if(received_data[0] == '1') {
+						current_state = NEW_USERNAME;
+						log_state = 2;
+					}
+					else if (received_data[0] == '2') {
+						current_state = ENTERING_USERNAME;
+						log_state = 3;
+					}
+					else
+						log_state = 1;
+				}
+			}
+			else if(current_state == NEW_USERNAME) {
+				if(data_index > 5) {
+					log_state = 1;
+				} else {
+					username[0] = received_data[0];
+					username[1] = received_data[1];
+					username[2] = received_data[2];
+					username[3] = received_data[3];
+					current_state = NEW_PASSWORD;
+					log_state = 4;
+				}
+			}
+			else if(current_state == NEW_PASSWORD) {
+				if(strcmpwithlength("done", received_data, 4) && pass_index > 3) {
+					pass_index = 0;
+					current_state = MENU;
+					log_state = 0;
+				}
+				else if (pass_index <= 3)
+					log_state = 9;
+				else
+					log_state = 1;
+			}
+			else if(current_state == ENTERING_USERNAME) {
+				if(data_index > 5) {
+					log_state = 7;
+					current_state = MENU;
+				} else {
+					username_to_check[0] = received_data[0];
+					username_to_check[1] = received_data[1];
+					username_to_check[2] = received_data[2];
+					username_to_check[3] = received_data[3];
+					if(check_username()) {
+						current_state = ENTERING_PASSWORD;
+						log_state = 5;
+					} else {
+						log_state = 7;
+						current_state = MENU;
+					}
+				}
+			}
+			else if(current_state == ENTERING_PASSWORD) {
+				if(strcmpwithlength("done", received_data, 4)) {
+					if(passcmp()) {
+						current_state = ENTERING_STATE;
+						log_state = 6;
+					} else {
+						log_state = 8;
+					}
+					pass_tck_index = 0;
+				} else
+					log_state = 1;
+			}
+			else if(current_state == ENTERING_STATE) {
+				if(strcmpwithlength("on", received_data, 2)) {
+					current_state = SYSTEM_ON;
+					log_state = 10;
+				} else if (strcmpwithlength("off", received_data, 3)) {
+					current_state = MENU;
+					log_state = 0;
+				}
+			}
+			else if(current_state == DOZD_DETECTED_USERNAME) {
+				if(data_index > 5) {
+					log_state = 7;
+				} else {
+					username_to_check[0] = received_data[0];
+					username_to_check[1] = received_data[1];
+					username_to_check[2] = received_data[2];
+					username_to_check[3] = received_data[3];
+					if(check_username()) {
+						current_state = DOZD_DETECTED_PASSWORD;
+						log_state = 5;
+					} else
+						log_state = 7;
+				}
+			}
+			else if(current_state == DOZD_DETECTED_PASSWORD) {
+				if(strcmpwithlength("done", received_data, 4)) {
+					if(passcmp()) {
+						current_state = SYSTEM_ON;
+						PWM_Change_Tone(0, 0);
+						log_state = 10;
+					} else {
+						log_state = 8;
+						volume = volume * 2;
+					}
+					pass_tck_index = 0;
+				} else
+					log_state = 1;
+			}
+			uart_log(log_state);
+			data_index = 0;
+		}
+  	}
+  }
+
 
 /* USER CODE END 0 */
 
@@ -116,7 +579,23 @@ int main(void)
   MX_USART2_UART_Init();
   MX_ADC2_Init();
   MX_USART1_UART_Init();
+  MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
+
+  HAL_TIM_Base_Start_IT(&htim2);
+  HAL_TIM_Base_Start(&htim4);
+  HAL_TIM_Base_Start_IT(&htim6);
+  HAL_UART_Receive_IT(&huart1, &receive, 1);
+  PWM_Start();
+//  PWM_Change_Tone(4000, 100);
+//  __HAL_TIM_SET_COMPARE(led_pwm_timer, led_pwm_channel, 100);
+
+//  htim2.Instance->CCR2 = 100;
+
+
+
+  uart_log(log_state);
+
 
   /* USER CODE END 2 */
 
@@ -291,7 +770,7 @@ static void MX_ADC2_Init(void)
 
   /** Configure Regular Channel
   */
-  sConfig.Channel = ADC_CHANNEL_5;
+  sConfig.Channel = ADC_CHANNEL_6;
   sConfig.Rank = ADC_REGULAR_RANK_1;
   sConfig.SingleDiff = ADC_SINGLE_ENDED;
   sConfig.SamplingTime = ADC_SAMPLETIME_601CYCLES_5;
@@ -415,9 +894,9 @@ static void MX_TIM2_Init(void)
 
   /* USER CODE END TIM2_Init 1 */
   htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 480;
+  htim2.Init.Prescaler = 48;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 100;
+  htim2.Init.Period = 10000;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
@@ -510,6 +989,44 @@ static void MX_TIM4_Init(void)
 
   /* USER CODE END TIM4_Init 2 */
   HAL_TIM_MspPostInit(&htim4);
+
+}
+
+/**
+  * @brief TIM6 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM6_Init(void)
+{
+
+  /* USER CODE BEGIN TIM6_Init 0 */
+
+  /* USER CODE END TIM6_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM6_Init 1 */
+
+  /* USER CODE END TIM6_Init 1 */
+  htim6.Instance = TIM6;
+  htim6.Init.Prescaler = 4800;
+  htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim6.Init.Period = 100;
+  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim6, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM6_Init 2 */
+
+  /* USER CODE END TIM6_Init 2 */
 
 }
 
@@ -639,7 +1156,13 @@ static void MX_GPIO_Init(void)
                           |LD6_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_12, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, LED1_GO_Pin|LED2_GO_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(RELAY_GO_GPIO_Port, RELAY_GO_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pins : CS_I2C_SPI_Pin LD4_Pin LD3_Pin PE10
                            LD7_Pin LD9_Pin LD10_Pin LD8_Pin
@@ -664,20 +1187,39 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PC10 PC11 PC12 */
-  GPIO_InitStruct.Pin = GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_12;
+  /*Configure GPIO pins : PD12 PIR_GE_Pin B3_GE_Pin B2_GE_Pin
+                           B3_GED3_Pin */
+  GPIO_InitStruct.Pin = GPIO_PIN_12|PIR_GE_Pin|B3_GE_Pin|B2_GE_Pin
+                          |B3_GED3_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PA9 */
+  GPIO_InitStruct.Pin = GPIO_PIN_9;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : LED1_GO_Pin LED2_GO_Pin */
+  GPIO_InitStruct.Pin = LED1_GO_Pin|LED2_GO_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PD0 PD1 PD2 PD3 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+  /*Configure GPIO pin : RELAY_GO_Pin */
+  GPIO_InitStruct.Pin = RELAY_GO_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(RELAY_GO_GPIO_Port, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+
   HAL_NVIC_SetPriority(EXTI1_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(EXTI1_IRQn);
 
@@ -686,6 +1228,9 @@ static void MX_GPIO_Init(void)
 
   HAL_NVIC_SetPriority(EXTI3_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(EXTI3_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
 /* USER CODE BEGIN MX_GPIO_Init_2 */
 /* USER CODE END MX_GPIO_Init_2 */

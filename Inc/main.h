@@ -36,12 +36,12 @@ extern "C" {
 
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
-extern ADC_HandleTypeDef hadc1;
-extern I2C_HandleTypeDef hi2c1;
-extern SPI_HandleTypeDef hspi1;
-extern TIM_HandleTypeDef htim2;
-extern TIM_HandleTypeDef htim4;
-extern UART_HandleTypeDef huart2;
+//extern ADC_HandleTypeDef hadc1;
+//extern I2C_HandleTypeDef hi2c1;
+//extern SPI_HandleTypeDef hspi1;
+//extern TIM_HandleTypeDef htim2;
+//extern TIM_HandleTypeDef htim4;
+//extern UART_HandleTypeDef huart2;
 
 /* USER CODE END ET */
 
@@ -109,6 +109,24 @@ void Error_Handler(void);
 #define SWDIO_GPIO_Port GPIOA
 #define SWCLK_Pin GPIO_PIN_14
 #define SWCLK_GPIO_Port GPIOA
+#define LED1_GO_Pin GPIO_PIN_10
+#define LED1_GO_GPIO_Port GPIOC
+#define LED2_GO_Pin GPIO_PIN_11
+#define LED2_GO_GPIO_Port GPIOC
+#define RELAY_GO_Pin GPIO_PIN_12
+#define RELAY_GO_GPIO_Port GPIOC
+#define PIR_GE_Pin GPIO_PIN_0
+#define PIR_GE_GPIO_Port GPIOD
+#define PIR_GE_EXTI_IRQn EXTI0_IRQn
+#define B3_GE_Pin GPIO_PIN_1
+#define B3_GE_GPIO_Port GPIOD
+#define B3_GE_EXTI_IRQn EXTI1_IRQn
+#define B2_GE_Pin GPIO_PIN_2
+#define B2_GE_GPIO_Port GPIOD
+#define B2_GE_EXTI_IRQn EXTI2_TSC_IRQn
+#define B3_GED3_Pin GPIO_PIN_3
+#define B3_GED3_GPIO_Port GPIOD
+#define B3_GED3_EXTI_IRQn EXTI3_IRQn
 #define SWO_Pin GPIO_PIN_3
 #define SWO_GPIO_Port GPIOB
 #define I2C1_SCL_Pin GPIO_PIN_6
